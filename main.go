@@ -45,7 +45,7 @@ func main() {
 	// Start the server and bind to all interfaces (0.0.0.0)
 	go func() {
 		log.Printf("Serving file %s on port %s\n", absPath, *port)
-		if err := http.ListenAndServe("0.0.0.0:"+*port, nil); err != nil {
+		if err := http.ListenAndServe(":"+*port, nil); err != nil {
 			log.Fatalf("Error starting server: %v", err)
 		}
 	}()
