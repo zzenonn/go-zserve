@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -11,74 +10,113 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"github.com/spf13/cobra"
 )
 
-func main() {
-	// Check if running as root (sudo)
-	if !isRoot() {
-		log.Fatal("This program must be run with sudo or as root")
-	}
+var (
+	port string
+	zone string
+)
 
-	// Use flags for the port and zone
-	port := flag.String("port", "8080", "The port to serve the file on")
-	zone := flag.String("zone", "public", "The firewalld zone to use")
-	flag.Parse()
+var rootCmd = &cobra.Command{
+	Use:   "zserve [flags] <file-path>",
+	Short: "Serve a file over HTTP with automatic firewall management",
+	Long: `zserve temporarily serves a file over HTTP on a specified port.
+It automatically opens the port using firewalld and closes it when
+the program exits. Must be run with sudo or as root.
 
-	// Ensure the file path is provided as an argument
-	if len(flag.Args()) == 0 {
-		log.Fatal("You must provide a file path as an argument")
-	}
+The zone parameter specifies which firewalld zone to use for opening
+the port. Common zones include:
+  public   - Default zone, allows limited incoming connections
+  trusted  - Allows all network connections  
+  internal - For internal networks with more trust
+  home     - For home networks
 
-	// Get the file path from the arguments
-	filePath := flag.Arg(0)
+Use 'firewall-cmd --get-zones' to see all available zones.`,
+	Example: `  # Serve a text file on default port 8080
+  sudo zserve /path/to/file.txt
 
-	// Check if the file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.Fatalf("The file %s does not exist", filePath)
-	}
+  # Serve a PDF on port 9090 in trusted zone
+  sudo zserve --port 9090 --zone trusted /path/to/document.pdf
 
-	// Get the absolute path of the file
-	absPath, err := filepath.Abs(filePath)
-	if err != nil {
-		log.Fatalf("Error getting absolute path: %v", err)
-	}
+  # Serve a Linux ISO file for network installation
+  sudo zserve --port 8080 --zone public ~/Downloads/ubuntu-22.04.3-desktop-amd64.iso
 
-	// Get the file name from the path
-	fileName := filepath.Base(absPath)
-
-	// Open the port temporarily using firewalld with the specified zone
-	err = openFirewallPort(*port, *zone)
-	if err != nil {
-		log.Fatalf("Error opening firewall port: %v", err)
-	}
-
-	// Define the handler to serve the file based on its filename
-	http.HandleFunc("/"+fileName, func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, absPath)
-	})
-
-	// Start the server and bind to all interfaces (0.0.0.0)
-	go func() {
-		log.Printf("Serving file %s on port %s\n", absPath, *port)
-		if err := http.ListenAndServe(":"+*port, nil); err != nil {
-			log.Fatalf("Error starting server: %v", err)
+  # Serve an image file on home network
+  sudo zserve --port 8080 --zone home ~/Pictures/screenshot.png`,
+	Args: cobra.ExactArgs(1),
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		// Check if running as root (sudo)
+		if !isRoot() {
+			return fmt.Errorf("this program must be run with sudo or as root\n\nTry: sudo zserve [flags] <file-path>")
 		}
-	}()
+		return nil
+	},
+	RunE: func(cmd *cobra.Command, args []string) error {
+		filePath := args[0]
 
-	// Get the machine's local IP address
-	ip, err := getLocalIP()
-	if err != nil {
-		log.Fatalf("Error getting local IP address: %v", err)
+		// Check if the file exists
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			return fmt.Errorf("the file %s does not exist", filePath)
+		}
+
+		// Get the absolute path of the file
+		absPath, err := filepath.Abs(filePath)
+		if err != nil {
+			return fmt.Errorf("error getting absolute path: %v", err)
+		}
+
+		// Get the file name from the path
+		fileName := filepath.Base(absPath)
+
+		// Open the port temporarily using firewalld with the specified zone
+		err = openFirewallPort(port, zone)
+		if err != nil {
+			return fmt.Errorf("error opening firewall port: %v", err)
+		}
+
+		// Define the handler to serve the file based on its filename
+		http.HandleFunc("/"+fileName, func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, absPath)
+		})
+
+		// Start the server and bind to all interfaces (0.0.0.0)
+		go func() {
+			log.Printf("Serving file %s on port %s\n", absPath, port)
+			if err := http.ListenAndServe(":"+port, nil); err != nil {
+				log.Fatalf("Error starting server: %v", err)
+			}
+		}()
+
+		// Get the machine's local IP address
+		ip, err := getLocalIP()
+		if err != nil {
+			return fmt.Errorf("error getting local IP address: %v", err)
+		}
+
+		// Display the actual IP address and the file URL
+		fmt.Printf("File is available at: http://%s:%s/%s\n", ip, port, fileName)
+		fmt.Printf("Press Ctrl+C to stop the server and close the firewall port.\n")
+
+		// Handle program termination signals to clean up
+		cleanupOnExit(port, zone)
+
+		// Keep the program running
+		select {}
+	},
+}
+
+func init() {
+	rootCmd.Flags().StringVarP(&port, "port", "p", "8080", "The port to serve the file on (default: 8080)")
+	rootCmd.Flags().StringVarP(&zone, "zone", "z", "public", "The firewalld zone to use (default: public)")
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
-
-	// Display the actual IP address and the file URL
-	fmt.Printf("File is available at: http://%s:%s/%s\n", ip, *port, fileName)
-
-	// Handle program termination signals to clean up
-	cleanupOnExit(*port, *zone)
-
-	// Keep the program running
-	select {}
 }
 
 // isRoot checks if the program is being run as root (with sudo)
@@ -142,4 +180,3 @@ func getLocalIP() (string, error) {
 
 	return localAddr.IP.String(), nil
 }
-
